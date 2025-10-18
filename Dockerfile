@@ -22,8 +22,9 @@ COPY . /app
 # Copy the extracted CAPEC taxonomy file from the previous stage
 COPY --from=capec-downloader /tmp/1000.xml /app/1000.xml
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies and remove pip afterwards to reduce image size
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip uninstall -y pip setuptools wheel
 
 # Verify the CAPEC file is in place and show its size
 RUN ls -la /app/1000.xml && echo "CAPEC taxonomy file successfully installed"
