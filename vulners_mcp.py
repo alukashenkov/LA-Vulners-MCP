@@ -4,8 +4,8 @@ import os
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Union
-from mcp.server.fastmcp import FastMCP
+from typing import Dict, List, Optional, Any, Union, Annotated
+from fastmcp import FastMCP
 import httpx
 from pydantic import BaseModel, Field, field_validator
 
@@ -14,8 +14,8 @@ debug_mode = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes", "on")
 logging_level = logging.DEBUG if debug_mode else logging.INFO
 logging.basicConfig(level=logging_level, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Initialize FastMCP server
-mcp = FastMCP("Vulners-MCP", stateless_http=False)
+# Initialize FastMCP server with HTTP/SSE transport
+mcp = FastMCP("LA-Vulners-MCP")
 
 # Global cache for CAPEC ID to name mapping
 _capec_cache = None
@@ -1631,9 +1631,6 @@ async def _fetch_circl_document_data(cve_id: str, api_key: str) -> dict:
             'error': f"FETCH_ERROR_{str(e)}"
         }
 
-
-
-
 def _validate_bulletin_id(bulletin_id: str) -> tuple[bool, str]:
     """Validates bulletin ID format and returns (is_valid, error_message)."""
     if not bulletin_id or not isinstance(bulletin_id, str):
@@ -1653,160 +1650,6 @@ def _validate_bulletin_id(bulletin_id: str) -> tuple[bool, str]:
     # Accept everything else - bulletin IDs come in many formats from different vendors
     # The real validation is that they must come from CVE search results
     return True, ""
-
-
-
-@mcp.tool(
-    name="vulners_cve_info", 
-    description="Retrieve comprehensive vulnerability intelligence for any CVE ID from the Vulners database, providing multi-layered threat analysis data and connected document discovery. Output is optimized for CrewAI consumption with structured JSON format.",
-    structured_output=True
-)
-async def vulners_cve_info(cve_id: str) -> CveInfoOutput:
-    """Retrieve comprehensive vulnerability intelligence using clean separation of data fetching and formatting."""
-
-    logging.info(f"Starting CVE analysis for: {cve_id}")
-    logging.debug(f"Fetching detailed information from Vulners API for: {cve_id}")
-
-    # Validate input using Pydantic
-    try:
-        input_data = CveInfoInput(cve_id=cve_id)
-        cve_id = input_data.cve_id  # Use validated and normalized CVE ID
-    except ValueError as e:
-        logging.error(f"CVE input validation failed: {e}")
-        return CveInfoOutput(
-            success=False,
-            error=str(e),
-            cve_id=cve_id
-        )
-
-    api_key = os.getenv("VULNERS_API_KEY")
-
-    if not api_key:
-        error_msg = "VULNERS_API_KEY not configured"
-        logging.error(f"CVE {cve_id} failed: {error_msg}")
-        return CveInfoOutput(
-            success=False,
-            error=f"{error_msg}. Please set VULNERS_API_KEY environment variable.",
-            cve_id=cve_id
-        )
-
-    # Step 1: Fetch CVE data
-    logging.debug(f"Step 1: Fetching CVE data for {cve_id}")
-    cve_data = await _fetch_cve_data(cve_id, api_key)
-    
-    if cve_data.get('error'):
-        error_msg = cve_data['error']
-        logging.error(f"CVE {cve_id} data fetch failed: {error_msg}")
-        return CveInfoOutput(
-            success=False,
-            error=error_msg,
-            cve_id=cve_id
-        )
-    
-    logging.info(f"CVE {cve_id} data fetch successful")
-
-    # Step 2: Fetch related documents data
-    related_docs_data = {'error': None, 'documents': [], 'related_cves': [], 'cve_titles': {}}
-    if cve_data.get('raw_data'):
-        related_docs_data = await _fetch_related_documents_data(cve_data['raw_data'], api_key)
-
-    # Step 3: Fetch CWE consequences data
-    cwe_consequences_data = []
-    if cve_data.get('cwe_classifications'):
-        logging.debug(f"Fetching CWE data for classifications: {cve_data['cwe_classifications']}")
-        for cwe_id in cve_data['cwe_classifications']:
-            cwe_data = await _fetch_cwe_data(cwe_id)
-            cwe_consequences_data.append(cwe_data)
-            logging.debug(f"CWE data for {cwe_id}: {cwe_data}")
-    
-    # Add CWE consequences data to cve_data for formatting
-    if cwe_consequences_data:
-        cve_data['cwe_consequences'] = cwe_consequences_data
-
-    # Step 4: Fetch CIRCL document data for Shadowserver information
-    logging.debug(f"Step 4: Fetching CIRCL document data for {cve_id}")
-    circl_data = await _fetch_circl_document_data(cve_id, api_key)
-    if circl_data.get('shadowserver_items'):
-        cve_data['shadowserver_items'] = circl_data['shadowserver_items']
-        logging.debug(f"Found {len(circl_data['shadowserver_items'])} Shadowserver items for {cve_id}")
-
-    # Step 5: Combine all CVE IDs
-    all_related_cves = set(cve_data.get('cvelist', []))
-    all_related_cves.update(related_docs_data.get('related_cves', []))
-    all_related_cves = list(all_related_cves)
-
-    # Step 6: Format output as JSON for CrewAI consumption
-    json_output = _format_cve_json_output(cve_data, related_docs_data, all_related_cves)
-    
-    logging.debug(f"json_output type: {type(json_output)}, value: {json_output}")
-
-    # Step 7: Save debug output if debug mode is enabled
-    _save_debug_output(cve_id, json.dumps(json_output, indent=2))
-
-    # Step 8: Convert to Pydantic model for validation
-    return _safe_pydantic_conversion(CveInfoOutput, json_output, "CVE output validation failed", cve_id=cve_id)
-
-@mcp.tool(
-    name="vulners_bulletin_info", 
-    description="Retrieve essential bulletin information for any security bulletin ID (GHSA, RHSA, NASL, advisories, etc.) from the Vulners database. Output is optimized for CrewAI consumption with structured JSON format.",
-    structured_output=True
-)
-async def vulners_bulletin_info(bulletin_id: str) -> BulletinInfoOutput:
-    """Retrieve comprehensive vulnerability intelligence for any security bulletin ID from the Vulners database."""
-
-    logging.info(f"Starting bulletin analysis for: {bulletin_id}")
-    logging.debug(f"Fetching detailed information from Vulners API for bulletin: {bulletin_id}")
-
-    # Validate input using Pydantic
-    try:
-        input_data = BulletinInfoInput(bulletin_id=bulletin_id)
-        bulletin_id = input_data.bulletin_id
-    except ValueError as e:
-        logging.error(f"Bulletin input validation failed: {e}")
-        return BulletinInfoOutput(
-            success=False,
-            error=str(e),
-            bulletin_id=bulletin_id
-        )
-
-    api_key = os.getenv("VULNERS_API_KEY")
-
-    if not api_key:
-        logging.warning("VULNERS_API_KEY not found. Please set it.")
-        return BulletinInfoOutput(
-            success=False,
-            error="VULNERS_API_KEY not configured.",
-            bulletin_id=bulletin_id
-        )
-    
-    # Validate bulletin ID format
-    is_valid, error_msg = _validate_bulletin_id(bulletin_id)
-    if not is_valid:
-        logging.error(f"Bulletin ID validation failed: {error_msg}")
-        return BulletinInfoOutput(
-            success=False,
-            error=error_msg,
-            bulletin_id=bulletin_id
-        )
-
-    # Fetch bulletin data
-    bulletin_data = await _fetch_bulletin_data(bulletin_id, api_key)
-    
-    if bulletin_data.get('error'):
-        return BulletinInfoOutput(
-            success=False,
-            error=bulletin_data['error'],
-            bulletin_id=bulletin_id
-        )
-
-    # Format output as JSON for CrewAI consumption
-    json_output = _format_bulletin_json_output(bulletin_data)
-
-    # Save debug output if debug mode is enabled
-    _save_debug_output(bulletin_id, json.dumps(json_output, indent=2))
-
-    # Convert to Pydantic model for validation
-    return _safe_pydantic_conversion(BulletinInfoOutput, json_output, "Bulletin output validation failed", bulletin_id=bulletin_id)
 
 def _format_cve_json_output(cve_data: dict, related_docs_data: dict, all_related_cves: list[str]) -> dict:
     """Formats structured CVE data into JSON output optimized for CrewAI consumption.
@@ -2104,5 +1947,266 @@ def _format_bulletin_json_output(bulletin_data: dict) -> dict:
     
     return result
 
+#MCP Tools Definitions
+
+@mcp.tool(
+    name="vulners_cve_info", 
+    description="Retrieve comprehensive vulnerability intelligence for any CVE ID from the Vulners database, providing multi-layered threat analysis data and connected document discovery. Output is optimized for CrewAI consumption with structured JSON format."
+)
+async def vulners_cve_info(
+    cve_id: Annotated[str, Field(
+        description="CVE identifier in format CVE-YYYY-NNNNN (e.g., CVE-2024-1234, CVE-2021-44228). Case-insensitive, will be normalized to uppercase."
+    )]
+) -> CveInfoOutput:
+    """Retrieve comprehensive vulnerability intelligence for a CVE ID from Vulners database.
+    
+    This tool provides deep vulnerability analysis including CVSS scores, EPSS predictions,
+    CWE classifications with CAPEC attack patterns, exploitation status, affected products,
+    solutions, workarounds, and related security documents.
+    
+    Args:
+        cve_id: CVE identifier in format CVE-YYYY-NNNNN (e.g., CVE-2024-1234).
+                Case-insensitive, will be normalized to uppercase.
+    
+    Returns:
+        CveInfoOutput: Structured vulnerability intelligence containing:
+            - success: Whether the request was successful
+            - error: Error message if unsuccessful
+            - cve_id: The CVE identifier
+            - core_info: Basic vulnerability information (ID, published date, description)
+            - cvss_metrics: CVSS scores from multiple sources (NVD, CNA) with versions 2.0-4.0
+            - ssvc_metrics: SSVC decision support metrics from Vulnrichment
+            - epss_score: EPSS exploitation probability score and percentile
+            - cwe_classifications: CWE weakness types
+            - cwe_consequences: CWE consequences with related CAPEC attack patterns
+            - exploitation_status: Wild exploitation status and sources (CISA KEV, Shadowserver)
+            - affected_products: List of affected products and platforms
+            - references: External reference URLs
+            - related_cves: Related CVE identifiers found in security bulletins
+            - solutions: Vendor solutions and patches (including Nessus plugin solutions)
+            - workarounds: Available workarounds
+            - related_documents: Security bulletins, advisories, and exploit documents
+    
+    Examples:
+        >>> result = await vulners_cve_info("CVE-2024-1234")
+        >>> if result.success:
+        >>>     print(f"CVSS: {result.cvss_metrics[0].base_score}")
+        >>>     print(f"Exploited: {result.exploitation_status.wild_exploited}")
+    
+    Notes:
+        - Requires VULNERS_API_KEY environment variable
+        - Aggregates data from multiple Vulners collections
+        - Related documents are filtered to prioritize authoritative sources
+        - CWE data fetched from MITRE CWE API
+        - CAPEC mappings loaded from local taxonomy file
+    """
+
+    logging.info(f"Starting CVE analysis for: {cve_id}")
+    logging.debug(f"Fetching detailed information from Vulners API for: {cve_id}")
+
+    # Validate input using Pydantic
+    try:
+        input_data = CveInfoInput(cve_id=cve_id)
+        cve_id = input_data.cve_id  # Use validated and normalized CVE ID
+    except ValueError as e:
+        logging.error(f"CVE input validation failed: {e}")
+        return CveInfoOutput(
+            success=False,
+            error=str(e),
+            cve_id=cve_id
+        )
+
+    api_key = os.getenv("VULNERS_API_KEY")
+
+    if not api_key:
+        error_msg = "VULNERS_API_KEY not configured"
+        logging.error(f"CVE {cve_id} failed: {error_msg}")
+        return CveInfoOutput(
+            success=False,
+            error=f"{error_msg}. Please set VULNERS_API_KEY environment variable.",
+            cve_id=cve_id
+        )
+
+    # Step 1: Fetch CVE data
+    logging.debug(f"Step 1: Fetching CVE data for {cve_id}")
+    cve_data = await _fetch_cve_data(cve_id, api_key)
+    
+    if cve_data.get('error'):
+        error_msg = cve_data['error']
+        logging.error(f"CVE {cve_id} data fetch failed: {error_msg}")
+        return CveInfoOutput(
+            success=False,
+            error=error_msg,
+            cve_id=cve_id
+        )
+    
+    logging.info(f"CVE {cve_id} data fetch successful")
+
+    # Step 2: Fetch related documents data
+    related_docs_data = {'error': None, 'documents': [], 'related_cves': [], 'cve_titles': {}}
+    if cve_data.get('raw_data'):
+        related_docs_data = await _fetch_related_documents_data(cve_data['raw_data'], api_key)
+
+    # Step 3: Fetch CWE consequences data
+    cwe_consequences_data = []
+    if cve_data.get('cwe_classifications'):
+        logging.debug(f"Fetching CWE data for classifications: {cve_data['cwe_classifications']}")
+        for cwe_id in cve_data['cwe_classifications']:
+            cwe_data = await _fetch_cwe_data(cwe_id)
+            cwe_consequences_data.append(cwe_data)
+            logging.debug(f"CWE data for {cwe_id}: {cwe_data}")
+    
+    # Add CWE consequences data to cve_data for formatting
+    if cwe_consequences_data:
+        cve_data['cwe_consequences'] = cwe_consequences_data
+
+    # Step 4: Fetch CIRCL document data for Shadowserver information
+    logging.debug(f"Step 4: Fetching CIRCL document data for {cve_id}")
+    circl_data = await _fetch_circl_document_data(cve_id, api_key)
+    if circl_data.get('shadowserver_items'):
+        cve_data['shadowserver_items'] = circl_data['shadowserver_items']
+        logging.debug(f"Found {len(circl_data['shadowserver_items'])} Shadowserver items for {cve_id}")
+
+    # Step 5: Combine all CVE IDs
+    all_related_cves = set(cve_data.get('cvelist', []))
+    all_related_cves.update(related_docs_data.get('related_cves', []))
+    all_related_cves = list(all_related_cves)
+
+    # Step 6: Format output as JSON for CrewAI consumption
+    json_output = _format_cve_json_output(cve_data, related_docs_data, all_related_cves)
+    
+    logging.debug(f"json_output type: {type(json_output)}, value: {json_output}")
+
+    # Step 7: Save debug output if debug mode is enabled
+    _save_debug_output(cve_id, json.dumps(json_output, indent=2))
+
+    # Step 8: Convert to Pydantic model for validation
+    return _safe_pydantic_conversion(CveInfoOutput, json_output, "CVE output validation failed", cve_id=cve_id)
+
+@mcp.tool(
+    name="vulners_bulletin_info", 
+    description="Retrieve essential bulletin information for any security bulletin ID (GHSA, RHSA, NASL, advisories, etc.) from the Vulners database. Output is optimized for CrewAI consumption with structured JSON format."
+)
+async def vulners_bulletin_info(
+    bulletin_id: Annotated[str, Field(
+        description="Security bulletin identifier from RELATED_DOCUMENTS section. Examples: GHSA-xxxx-xxxx-xxxx, RHSA-YYYY:NNNN, DSA-NNNN-N, USN-NNNN-N, NASL family names, scanner signatures. NOTE: Do NOT use CVE IDs or URLs here - only bulletin IDs from related documents."
+    )]
+) -> BulletinInfoOutput:
+    """Retrieve security bulletin information from Vulners database.
+    
+    This tool fetches detailed information about security bulletins from various sources
+    including vendor advisories (RHSA, DSA, USN), GitHub Security Advisories (GHSA),
+    Nessus plugins (NASL), exploit databases, and scanner signatures.
+    
+    Args:
+        bulletin_id: Security bulletin identifier. Supported formats include:
+            - GHSA-xxxx-xxxx-xxxx (GitHub Security Advisory)
+            - RHSA-YYYY:NNNN (Red Hat Security Advisory)
+            - DSA-NNNN-N (Debian Security Advisory)
+            - USN-NNNN-N (Ubuntu Security Notice)
+            - NASL family names (Nessus plugins)
+            - Scanner signatures (OpenVAS, Nessus)
+            - Exploit database IDs
+            
+            NOTE: Do NOT use CVE IDs or URLs. Only use bulletin IDs that appear
+            in the [RELATED_DOCUMENTS] section of CVE search results.
+    
+    Returns:
+        BulletinInfoOutput: Structured bulletin information containing:
+            - success: Whether the request was successful
+            - error: Error message if unsuccessful
+            - bulletin_id: The bulletin identifier
+            - core_info: Basic bulletin information
+                - id: Bulletin identifier
+                - type: Bulletin family/type (e.g., 'github', 'redhat', 'nessus')
+                - published: Publication date
+                - title: Bulletin title
+                - description: Detailed description
+                - href: Link to original bulletin
+            - references: External reference URLs
+            - related_cves: List of CVE IDs mentioned in the bulletin
+    
+    Examples:
+        >>> result = await vulners_bulletin_info("GHSA-1234-5678-90ab")
+        >>> if result.success:
+        >>>     print(f"Type: {result.core_info.type}")
+        >>>     print(f"CVEs: {', '.join(result.related_cves)}")
+        
+        >>> # Get Nessus plugin details
+        >>> result = await vulners_bulletin_info("NASL:12345")
+        >>> print(f"Solution: {result.core_info.description}")
+    
+    Notes:
+        - Requires VULNERS_API_KEY environment variable
+        - CVE IDs are extracted from references, title, and description
+        - Use CVE search results to discover valid bulletin IDs
+        - Invalid formats (URLs, CVE IDs) will return validation errors
+    """
+
+    logging.info(f"Starting bulletin analysis for: {bulletin_id}")
+    logging.debug(f"Fetching detailed information from Vulners API for bulletin: {bulletin_id}")
+
+    # Validate input using Pydantic
+    try:
+        input_data = BulletinInfoInput(bulletin_id=bulletin_id)
+        bulletin_id = input_data.bulletin_id
+    except ValueError as e:
+        logging.error(f"Bulletin input validation failed: {e}")
+        return BulletinInfoOutput(
+            success=False,
+            error=str(e),
+            bulletin_id=bulletin_id
+        )
+
+    api_key = os.getenv("VULNERS_API_KEY")
+
+    if not api_key:
+        logging.warning("VULNERS_API_KEY not found. Please set it.")
+        return BulletinInfoOutput(
+            success=False,
+            error="VULNERS_API_KEY not configured.",
+            bulletin_id=bulletin_id
+        )
+    
+    # Validate bulletin ID format
+    is_valid, error_msg = _validate_bulletin_id(bulletin_id)
+    if not is_valid:
+        logging.error(f"Bulletin ID validation failed: {error_msg}")
+        return BulletinInfoOutput(
+            success=False,
+            error=error_msg,
+            bulletin_id=bulletin_id
+        )
+
+    # Fetch bulletin data
+    bulletin_data = await _fetch_bulletin_data(bulletin_id, api_key)
+    
+    if bulletin_data.get('error'):
+        return BulletinInfoOutput(
+            success=False,
+            error=bulletin_data['error'],
+            bulletin_id=bulletin_id
+        )
+
+    # Format output as JSON for CrewAI consumption
+    json_output = _format_bulletin_json_output(bulletin_data)
+
+    # Save debug output if debug mode is enabled
+    _save_debug_output(bulletin_id, json.dumps(json_output, indent=2))
+
+    # Convert to Pydantic model for validation
+    return _safe_pydantic_conversion(BulletinInfoOutput, json_output, "Bulletin output validation failed", bulletin_id=bulletin_id)
+
 if __name__ == "__main__":
-    mcp.run()
+    # Configure transport based on environment variable
+    # - "stdio" for Cursor/Claude Desktop (communication via stdin/stdout)
+    # - "http" for VM-Agent and other HTTP clients (serves at /mcp endpoint)
+    # Default to "stdio" if not specified (most common for MCP clients)
+    transport = os.getenv("MCP_TRANSPORT", "stdio")
+    
+    if transport == "http":
+        # HTTP transport: Bind to 0.0.0.0 to accept connections from outside Docker
+        mcp.run(transport="http", host="0.0.0.0", port=8000)
+    else:
+        # Stdio transport: For Cursor, Claude Desktop, and other stdio-based clients
+        mcp.run(transport="stdio")

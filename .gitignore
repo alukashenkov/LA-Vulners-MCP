@@ -172,6 +172,3 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
-
-# Local shell scripts with API keys
-vulners_mcp_start.sh

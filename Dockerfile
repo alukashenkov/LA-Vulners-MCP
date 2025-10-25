@@ -29,9 +29,9 @@ RUN pip install --no-cache-dir -r requirements.txt && \
 # Verify the CAPEC file is in place and show its size
 RUN ls -la /app/1000.xml && echo "CAPEC taxonomy file successfully installed"
 
-# Expose the port mcpo will use
+# Expose the port for the MCP server
 EXPOSE 8000
 
-# Run the MCP server using mcpo
-CMD ["mcpo", "--port", "8000", "--", "python3", "vulners_mcp.py"]
+# Run the MCP server directly with FastMCP
+CMD ["python3", "vulners_mcp.py"]
 
