@@ -11,7 +11,7 @@ RUN wget -O /tmp/1000.xml.zip https://capec.mitre.org/data/xml/views/1000.xml.zi
     ls -la /tmp/1000.xml
 
 # Stage 2: Final runtime image
-FROM python:3-alpine
+FROM python:3.14-alpine
 
 # Set the working directory in the container
 WORKDIR /app
